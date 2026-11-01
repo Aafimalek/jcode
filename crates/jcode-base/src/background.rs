@@ -536,10 +536,8 @@ impl BackgroundTaskManager {
         let handle = tokio::spawn(runtime_activity.scope(async move {
             let result = execute_fn(output_path_clone.clone()).await;
 
-            // The cancelling caller owns status publication, as with aborted tasks.
-            if result.as_ref().is_ok_and(|result| result.cancelled) {
-                return result;
-            }
+            // The task must persist cancellation even if its caller is aborted.
+            let cancelled = result.as_ref().is_ok_and(|result| result.cancelled);
 
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
@@ -610,6 +608,11 @@ impl BackgroundTaskManager {
             drop(status_guard);
             let _ = registered_rx.await;
             tasks_for_prune.write().await.remove(&task_id_clone);
+
+            // Cancellation already has a terminal status and is not a normal completion.
+            if cancelled {
+                return result;
+            }
 
             // Read output preview for notification
             let output_preview = tokio::fs::read_to_string(&output_path_clone)
@@ -1401,9 +1404,7 @@ impl BackgroundTaskManager {
                 // The task may finish normally before it observes cancellation.
                 // In that case its published result must remain authoritative.
                 let result = (&mut task.handle).await??;
-                if !result.cancelled {
-                    return Ok(false);
-                }
+                return Ok(result.cancelled);
             } else {
                 task.handle.abort();
                 let _ = (&mut task.handle).await;
